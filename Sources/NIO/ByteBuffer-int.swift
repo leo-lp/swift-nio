@@ -42,6 +42,13 @@ extension ByteBuffer {
 
     /// Get the integer at `index` from this `ByteBuffer`. Does not move the reader index.
     ///
+    /// - note: Please consider using `readInteger` which is a safer alternative that automatically maintains the
+    ///         `readerIndex` and won't allow you to read uninitialized memory.
+    /// - warning: This method allows the user to read any of the bytes in the `ByteBuffer`'s storage, including
+    ///           _uninitialized_ ones. To use this API in a safe way the user needs to make sure all the requested
+    ///           bytes have been written before and are therefore initialized. Note that bytes between (including)
+    ///           `readerIndex` and (excluding) `writerIndex` are always initialized by contract and therefore must be
+    ///           safe to read.
     /// - parameters:
     ///     - index: The starting index of the bytes for the integer into the `ByteBuffer`.
     ///     - endianness: The endianness of the integer in this `ByteBuffer` (defaults to big endian).
@@ -105,7 +112,9 @@ extension FixedWidthInteger {
 }
 
 extension UInt32 {
-    /// Returns the next power of two unless that would overflow in which case UInt32.max is returned.
+    /// Returns the next power of two unless that would overflow, in which case UInt32.max (on 64-bit systems) or
+    /// Int32.max (on 32-bit systems) is returned. The returned value is always safe to be cast to Int and passed
+    /// to malloc on all platforms.
     public func nextPowerOf2ClampedToMax() -> UInt32 {
         guard self > 0 else {
             return 1
@@ -113,13 +122,21 @@ extension UInt32 {
 
         var n = self
 
+        #if arch(arm) || arch(i386)
+        // on 32-bit platforms we can't make use of a whole UInt32.max (as it doesn't fit in an Int)
+        let max = UInt32(Int.max)
+        #else
+        // on 64-bit platforms we're good
+        let max = UInt32.max
+        #endif
+
         n -= 1
         n |= n >> 1
         n |= n >> 2
         n |= n >> 4
         n |= n >> 8
         n |= n >> 16
-        if n != .max {
+        if n != max {
             n += 1
         }
 

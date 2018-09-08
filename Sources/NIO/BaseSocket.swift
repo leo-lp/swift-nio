@@ -24,7 +24,7 @@ protocol SockAddrProtocol {
 }
 
 /// Returns a description for the given address.
-private func descriptionForAddress(family: CInt, bytes: UnsafeRawPointer, length byteCount: Int) -> String {
+internal func descriptionForAddress(family: CInt, bytes: UnsafeRawPointer, length byteCount: Int) -> String {
     var addressBytes: [Int8] = Array(repeating: 0, count: byteCount)
     return addressBytes.withUnsafeMutableBufferPointer { (addressBytesPtr: inout UnsafeMutableBufferPointer<Int8>) -> String in
         try! Posix.inet_ntop(addressFamily: family,
@@ -267,7 +267,8 @@ class BaseSocket: Selectable {
         #if !os(Linux)
         if setNonBlocking {
             do {
-                try Posix.fcntl(descriptor: sock, command: F_SETFL, value: O_NONBLOCK)
+                let ret = try Posix.fcntl(descriptor: sock, command: F_SETFL, value: O_NONBLOCK)
+                assert(ret == 0, "unexpectedly, fcntl(\(sock), F_SETFL, O_NONBLOCK) returned \(ret)")
             } catch {
                 _ = try? Posix.close(descriptor: sock)
                 throw error
@@ -296,7 +297,7 @@ class BaseSocket: Selectable {
     /// Create a new instance.
     ///
     /// The ownership of the passed in descriptor is transferred to this class. A user must call `close` to close the underlying
-    /// file descriptor once its not needed / used anymore.
+    /// file descriptor once it's not needed / used anymore.
     ///
     /// - parameters:
     ///     - descriptor: The file descriptor to wrap.
@@ -316,7 +317,8 @@ class BaseSocket: Selectable {
     /// throws: An `IOError` if the operation failed.
     final func setNonBlocking() throws {
         return try withUnsafeFileDescriptor { fd in
-            try Posix.fcntl(descriptor: fd, command: F_SETFL, value: O_NONBLOCK)
+            let ret = try Posix.fcntl(descriptor: fd, command: F_SETFL, value: O_NONBLOCK)
+            assert(ret == 0, "unexpectedly, fcntl(\(fd), F_SETFL, O_NONBLOCK) returned \(ret)")
         }
     }
 
@@ -330,7 +332,12 @@ class BaseSocket: Selectable {
     ///     - value: The value for the option.
     /// - throws: An `IOError` if the operation failed.
     final func setOption<T>(level: Int32, name: Int32, value: T) throws {
-        try withUnsafeFileDescriptor { fd in
+        if level == SocketOptionValue(IPPROTO_TCP) && name == TCP_NODELAY && (try? self.localAddress().protocolFamily) == Optional<Int32>.some(Int32(Posix.AF_UNIX)) {
+            // setting TCP_NODELAY on UNIX domain sockets will fail. Previously we had a bug where we would ignore
+            // most socket options settings so for the time being we'll just ignore this. Let's revisit for NIO 2.0.
+            return
+        }
+        return try withUnsafeFileDescriptor { fd in
             var val = value
 
             _ = try Posix.setsockopt(
@@ -353,10 +360,15 @@ class BaseSocket: Selectable {
     final func getOption<T>(level: Int32, name: Int32) throws -> T {
         return try withUnsafeFileDescriptor { fd in
             var length = socklen_t(MemoryLayout<T>.size)
-            var val = UnsafeMutablePointer<T>.allocate(capacity: 1)
+            let storage = UnsafeMutableRawBufferPointer.allocate(byteCount: MemoryLayout<T>.stride,
+                                                                 alignment: MemoryLayout<T>.alignment)
+            // write zeroes into the memory as Linux's getsockopt doesn't zero them out
+            _ = storage.initializeMemory(as: UInt8.self, repeating: 0)
+            var val = storage.bindMemory(to: T.self).baseAddress!
+            // initialisation will be done by getsockopt
             defer {
                 val.deinitialize(count: 1)
-                val.deallocate()
+                storage.deallocate()
             }
 
             try Posix.getsockopt(socket: fd, level: level, optionName: name, optionValue: val, optionLen: &length)
